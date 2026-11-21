@@ -22,6 +22,7 @@ class ModuleMain : XposedModule() {
         const val TARGET_PACKAGE = "com.miui.home"
 
         const val UTILITIES = "com.miui.home.launcher.common.Utilities"
+        const val APPLICATION = "com.miui.home.launcher.Application"
         const val DEVICE_CONFIG = "com.miui.home.launcher.DeviceConfig"
         const val GESTURE_TRACKER = "com.miui.home.recents.GestureTouchEventTracker"
         const val GRID_CONTROLLER = "com.miui.home.launcher.grid.GridController"
@@ -34,22 +35,42 @@ class ModuleMain : XposedModule() {
         const val MAX_SHRINK_PERCENT = 12
     }
 
+    /**
+     * 注意：不能在 onPackageReady 里直接调 Utilities/DeviceConfig 这类依赖 Application 的类，
+     * 它们会在 <clinit> 里访问 Application.getInstance().getResources()，
+     * 此时 Application 还没创建，会抛 ExceptionInInitializerError 让桌面直接崩溃。
+     * 所以这里只 hook Application#onCreate，把所有实际安装推迟到 Application 就绪之后。
+     */
     override fun onPackageReady(param: PackageReadyParam) {
         if (param.packageName != TARGET_PACKAGE) return
         val cl = param.classLoader
         try {
-            if (!isPadDevice(cl)) {
-                log(Log.INFO, TAG, "非平板设备，不启用任何 hook")
-                return
+            val appCls = Class.forName(APPLICATION, false, cl)
+            val onCreate = appCls.getDeclaredMethod("onCreate")
+            hook(onCreate).intercept { chain ->
+                try {
+                    installHooks(cl)
+                } catch (t: Throwable) {
+                    log(Log.ERROR, TAG, "安装 hook 失败", t)
+                }
+                chain.proceed()
             }
-            var applied = 0
-            if (hookDockSize(cl)) applied++
-            if (hookDockGesture(cl)) applied++
-            if (hookExpandWorkspaceGrid(cl)) applied++
-            log(Log.INFO, TAG, "hook 应用完成: $applied/3")
+            log(Log.INFO, TAG, "已 hook $APPLICATION#onCreate()，等待 Application 就绪")
         } catch (t: Throwable) {
-            log(Log.ERROR, TAG, "初始化 hook 失败", t)
+            log(Log.ERROR, TAG, "hook Application#onCreate 失败", t)
         }
+    }
+
+    private fun installHooks(cl: ClassLoader) {
+        if (!isPadDevice(cl)) {
+            log(Log.INFO, TAG, "非平板设备，不启用任何 hook")
+            return
+        }
+        var applied = 0
+        if (hookDockSize(cl)) applied++
+        if (hookDockGesture(cl)) applied++
+        if (hookExpandWorkspaceGrid(cl)) applied++
+        log(Log.INFO, TAG, "hook 应用完成: $applied/3")
     }
 
     /** 平板判定，依次尝试 Utilities.isPadDevice() / DeviceConfig.USE_LIST_HOTSEATS。 */
@@ -83,7 +104,7 @@ class ModuleMain : XposedModule() {
      */
     private fun hookDockSize(cl: ClassLoader): Boolean {
         return try {
-            val cls = Class.forName(DEVICE_CONFIG, true, cl)
+            val cls = Class.forName(DEVICE_CONFIG, false, cl)
             hook(cls.getDeclaredMethod("getHotSeatsHeight")).intercept { HIDDEN_DOCK_HEIGHT }
             hook(cls.getDeclaredMethod("getDockWindowHeight")).intercept { HIDDEN_DOCK_HEIGHT }
             log(Log.INFO, TAG, "已 hook getHotSeatsHeight/getDockWindowHeight -> $HIDDEN_DOCK_HEIGHT")
@@ -97,7 +118,7 @@ class ModuleMain : XposedModule() {
     /** 上滑手势不再把 Dock 算进去，直接走最近任务。 */
     private fun hookDockGesture(cl: ClassLoader): Boolean {
         return try {
-            val cls = Class.forName(GESTURE_TRACKER, true, cl)
+            val cls = Class.forName(GESTURE_TRACKER, false, cl)
             hook(cls.getDeclaredMethod("isTouchCountAndHotSeatSupport")).intercept { false }
             log(Log.INFO, TAG, "已 hook isTouchCountAndHotSeatSupport() -> false")
             true
@@ -114,8 +135,10 @@ class ModuleMain : XposedModule() {
      */
     private fun hookExpandWorkspaceGrid(cl: ClassLoader): Boolean {
         return try {
-            val controllerCls = Class.forName(GRID_CONTROLLER, true, cl)
-            val notifyMethod = controllerCls.getDeclaredMethod("notifyGridChange")
+            val controllerCls = Class.forName(GRID_CONTROLLER, false, cl)
+            val notifyMethod = controllerCls.getDeclaredMethod("notifyGridChange").apply {
+                isAccessible = true
+            }
             val activeField = controllerCls.getDeclaredField("mActiveGridConfigInWorkspace").apply {
                 isAccessible = true
             }
@@ -132,7 +155,6 @@ class ModuleMain : XposedModule() {
                         if (expanded != null) {
                             activeField.set(controller, expanded)
                             suggestField.set(controller, expanded)
-                            log(Log.INFO, TAG, "桌面网格已扩展 -> $expanded")
                         }
                     }
                 } catch (t: Throwable) {
@@ -140,6 +162,18 @@ class ModuleMain : XposedModule() {
                 }
                 chain.proceed()
             }
+
+            // Application 阶段 GridController 的配置已经算好，这里主动刷一次（会走上面的 hook）
+            try {
+                val instance = controllerCls.getMethod("getInstance").invoke(null)
+                if (instance != null && activeField.get(instance) != null) {
+                    notifyMethod.invoke(instance)
+                    log(Log.INFO, TAG, "网格配置已扩展 -> ${activeField.get(instance)}")
+                }
+            } catch (t: Throwable) {
+                log(Log.WARN, TAG, "首次刷新网格配置失败", t)
+            }
+
             log(Log.INFO, TAG, "已 hook $GRID_CONTROLLER#notifyGridChange()")
             true
         } catch (t: Throwable) {
@@ -181,7 +215,7 @@ class ModuleMain : XposedModule() {
             return null
         }
 
-        val builderCls = Class.forName(GRID_CONFIG_BUILDER, true, cl)
+        val builderCls = Class.forName(GRID_CONFIG_BUILDER, false, cl)
         val builder = builderCls.getDeclaredConstructor().newInstance()
         val intSetter = { name: String, value: Int ->
             builderCls.getMethod("set$name", Integer.TYPE).invoke(builder, value)

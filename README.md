@@ -49,6 +49,10 @@
 
 ## 注意
 
+- **hook 安装时机**：`onPackageReady` 阶段不能碰 `Utilities` / `DeviceConfig` 这类类，它们的静态初始化会访问
+  `Application.getInstance().getResources()`，那时 Application 还没建好，会抛 `ExceptionInInitializerError`
+  让桌面启动即崩。本模块只在 `onPackageReady` 里 hook `Application#onCreate`，实际安装推迟到 Application 就绪之后。
+
 - 只在平板（`Utilities.isPadDevice() == true`）上生效，手机上装上也不会有任何行为变化。
 - 网格多一行后，桌面图标的坐标可能超过原来的 `countY`，卸载模块前建议把新增那一行的图标先移走。
 - Release APK 使用 debug 签名，仅用于自用。
