@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.res.Configuration
 import android.util.Log
 import android.view.View
+import android.view.WindowManager
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 
@@ -75,9 +76,59 @@ class ModuleMain : XposedModule() {
         var applied = 0
         if (hookDockSize(cl)) applied++
         if (hookDockGesture(cl)) applied++
+        if (hookDockWindowRemoval(cl)) applied++
         if (hookDockViewHide(cl)) applied++
         if (hookExpandWorkspaceGrid(cl)) applied++
-        log(Log.INFO, TAG, "hook 应用完成: $applied/4")
+        log(Log.INFO, TAG, "hook 应用完成: $applied/5")
+    }
+
+    /**
+     * 直接把 Dock 悬浮窗从 WindowManager 移除：控制器、状态机、拖拽链路全照常创建，
+     * 但窗口不存在，底部没有视图也没有触摸热区 —— 比“隐藏”更彻底。
+     * 同时拦掉后续的 updateViewLayout / removeViewImmediate，避免对未附加的 View 操作而报错。
+     */
+    private fun hookDockWindowRemoval(cl: ClassLoader): Boolean {
+        return try {
+            val cls = Class.forName(DOCK_WINDOW_MANAGER, false, cl)
+            val dockRootField = cls.getDeclaredField("dockRootView").apply { isAccessible = true }
+            val windowManagerField = cls.getDeclaredField("windowManager").apply { isAccessible = true }
+
+            val createWindow = cls.getDeclaredMethod("createWindow").apply { isAccessible = true }
+            hook(createWindow).intercept { chain ->
+                chain.proceed()
+                try {
+                    val self = chain.thisObject
+                    val view = dockRootField.get(self) as View
+                    val windowManager = windowManagerField.get(self) as WindowManager
+                    windowManager.removeViewImmediate(view)
+                    log(Log.INFO, TAG, "Dock 窗口已从 WindowManager 移除")
+                } catch (t: Throwable) {
+                    log(Log.WARN, TAG, "移除 Dock 窗口失败", t)
+                }
+                null
+            }
+
+            val updateWindowHeight = cls.getDeclaredMethod("updateWindowHeight", Integer.TYPE)
+                .apply { isAccessible = true }
+            hook(updateWindowHeight).intercept { chain ->
+                val view = dockRootField.get(chain.thisObject) as? View
+                if (view != null && view.parent == null) {
+                    // 窗口已移除，不再调用 updateViewLayout
+                    null
+                } else {
+                    chain.proceed()
+                }
+            }
+
+            val destroyWindow = cls.getDeclaredMethod("destroyWindow").apply { isAccessible = true }
+            hook(destroyWindow).intercept { null }
+
+            log(Log.INFO, TAG, "已 hook DockWindowManager#createWindow/updateWindowHeight/destroyWindow")
+            true
+        } catch (t: Throwable) {
+            log(Log.WARN, TAG, "接管 Dock 窗口失败", t)
+            false
+        }
     }
 
     /**
