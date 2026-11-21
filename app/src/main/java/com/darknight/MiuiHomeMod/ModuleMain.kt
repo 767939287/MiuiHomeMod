@@ -7,9 +7,10 @@ import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 /**
  * MiuiHomeMod —— 平板版 MIUI 桌面（com.miui.home）增强模块。
  *
- * 1. 关闭桌面底部 Dock 栏：hook DockControllerImpl#isDockEnabled() 恒为 false，
- *    initialize() 整段跳过 —— 不创建 Dock 悬浮窗口、不挂 HotSeats、不注册底部触摸热区。
- * 2. Dock 关闭后空出来的底部空间不会被浪费：把桌面网格向下扩展一行，
+ * 1. 隐藏桌面底部 Dock 栏：不碰 Dock 控制器的生命周期（跳过 initialize 会让桌面崩溃），
+ *    只把 Dock 悬浮窗与 HotSeats 的高度压成 1px，并让上滑手势不再识别 Dock。
+ *    思路同 HyperCeiler 的 HideDock / HotSeatsHeight。
+ * 2. Dock 关掉后空出来的底部空间不会被浪费：把桌面网格向下扩展一行，
  *    cellSize 尽量保持不变，网格高度填满原 Dock 区域。
  *
  * 仅平板设备生效（Utilities.isPadDevice()），手机端不做任何修改。
@@ -22,9 +23,12 @@ class ModuleMain : XposedModule() {
 
         const val UTILITIES = "com.miui.home.launcher.common.Utilities"
         const val DEVICE_CONFIG = "com.miui.home.launcher.DeviceConfig"
-        const val DOCK_CONTROLLER_IMPL = "com.miui.home.launcher.dock.DockControllerImpl"
+        const val GESTURE_TRACKER = "com.miui.home.recents.GestureTouchEventTracker"
         const val GRID_CONTROLLER = "com.miui.home.launcher.grid.GridController"
         const val GRID_CONFIG_BUILDER = "com.miui.home.launcher.grid.GridConfig\$GridConfigBuilder"
+
+        /** Dock 被压到的高度，用 1px 而不是 0，避免内部算出负尺寸。 */
+        const val HIDDEN_DOCK_HEIGHT = 1
 
         /** 允许为了塞下新的一行而缩小的最大比例，超过就放弃扩展。 */
         const val MAX_SHRINK_PERCENT = 12
@@ -38,8 +42,11 @@ class ModuleMain : XposedModule() {
                 log(Log.INFO, TAG, "非平板设备，不启用任何 hook")
                 return
             }
-            hookDisableDock(cl)
-            hookExpandWorkspaceGrid(cl)
+            var applied = 0
+            if (hookDockSize(cl)) applied++
+            if (hookDockGesture(cl)) applied++
+            if (hookExpandWorkspaceGrid(cl)) applied++
+            log(Log.INFO, TAG, "hook 应用完成: $applied/3")
         } catch (t: Throwable) {
             log(Log.ERROR, TAG, "初始化 hook 失败", t)
         }
@@ -70,12 +77,34 @@ class ModuleMain : XposedModule() {
         return false
     }
 
-    /** 关闭 Dock：让 DockControllerImpl 认为 dock 未启用，initialize() 直接返回。 */
-    private fun hookDisableDock(cl: ClassLoader) {
-        val cls = Class.forName(DOCK_CONTROLLER_IMPL, true, cl)
-        val method = cls.getDeclaredMethod("isDockEnabled")
-        hook(method).intercept { false }
-        log(Log.INFO, TAG, "已 hook $DOCK_CONTROLLER_IMPL#isDockEnabled() -> false")
+    /**
+     * 隐藏 Dock：把 Dock 悬浮窗高度和 HotSeats 高度都压成 1px。
+     * 保留 DockControllerImpl.initialize() 的完整执行，避免状态机/窗口管理缺失导致桌面崩溃。
+     */
+    private fun hookDockSize(cl: ClassLoader): Boolean {
+        return try {
+            val cls = Class.forName(DEVICE_CONFIG, true, cl)
+            hook(cls.getDeclaredMethod("getHotSeatsHeight")).intercept { HIDDEN_DOCK_HEIGHT }
+            hook(cls.getDeclaredMethod("getDockWindowHeight")).intercept { HIDDEN_DOCK_HEIGHT }
+            log(Log.INFO, TAG, "已 hook getHotSeatsHeight/getDockWindowHeight -> $HIDDEN_DOCK_HEIGHT")
+            true
+        } catch (t: Throwable) {
+            log(Log.WARN, TAG, "隐藏 Dock 窗口失败", t)
+            false
+        }
+    }
+
+    /** 上滑手势不再把 Dock 算进去，直接走最近任务。 */
+    private fun hookDockGesture(cl: ClassLoader): Boolean {
+        return try {
+            val cls = Class.forName(GESTURE_TRACKER, true, cl)
+            hook(cls.getDeclaredMethod("isTouchCountAndHotSeatSupport")).intercept { false }
+            log(Log.INFO, TAG, "已 hook isTouchCountAndHotSeatSupport() -> false")
+            true
+        } catch (t: Throwable) {
+            log(Log.WARN, TAG, "拦截 Dock 手势失败", t)
+            false
+        }
     }
 
     /**
@@ -83,34 +112,40 @@ class ModuleMain : XposedModule() {
      * 换成"多一行、无 dock 高度"的副本。CellLayout、翻页指示条、图标放置都读同一个
      * 配置对象，因此三者会保持一致。
      */
-    private fun hookExpandWorkspaceGrid(cl: ClassLoader) {
-        val controllerCls = Class.forName(GRID_CONTROLLER, true, cl)
-        val notifyMethod = controllerCls.getDeclaredMethod("notifyGridChange")
-        val activeField = controllerCls.getDeclaredField("mActiveGridConfigInWorkspace").apply {
-            isAccessible = true
-        }
-        val suggestField = controllerCls.getDeclaredField("mSuggestFullScreenGridConfig").apply {
-            isAccessible = true
-        }
-
-        hook(notifyMethod).intercept { chain ->
-            try {
-                val controller = chain.thisObject
-                val active = activeField.get(controller)
-                if (active != null) {
-                    val expanded = expandConfig(active, cl)
-                    if (expanded != null) {
-                        activeField.set(controller, expanded)
-                        suggestField.set(controller, expanded)
-                        log(Log.INFO, TAG, "桌面网格已扩展 -> $expanded")
-                    }
-                }
-            } catch (t: Throwable) {
-                log(Log.WARN, TAG, "扩展桌面网格失败", t)
+    private fun hookExpandWorkspaceGrid(cl: ClassLoader): Boolean {
+        return try {
+            val controllerCls = Class.forName(GRID_CONTROLLER, true, cl)
+            val notifyMethod = controllerCls.getDeclaredMethod("notifyGridChange")
+            val activeField = controllerCls.getDeclaredField("mActiveGridConfigInWorkspace").apply {
+                isAccessible = true
             }
-            chain.proceed()
+            val suggestField = controllerCls.getDeclaredField("mSuggestFullScreenGridConfig").apply {
+                isAccessible = true
+            }
+
+            hook(notifyMethod).intercept { chain ->
+                try {
+                    val controller = chain.thisObject
+                    val active = activeField.get(controller)
+                    if (active != null) {
+                        val expanded = expandConfig(active, cl)
+                        if (expanded != null) {
+                            activeField.set(controller, expanded)
+                            suggestField.set(controller, expanded)
+                            log(Log.INFO, TAG, "桌面网格已扩展 -> $expanded")
+                        }
+                    }
+                } catch (t: Throwable) {
+                    log(Log.WARN, TAG, "扩展桌面网格失败", t)
+                }
+                chain.proceed()
+            }
+            log(Log.INFO, TAG, "已 hook $GRID_CONTROLLER#notifyGridChange()")
+            true
+        } catch (t: Throwable) {
+            log(Log.WARN, TAG, "注册网格扩展 hook 失败", t)
+            false
         }
-        log(Log.INFO, TAG, "已 hook $GRID_CONTROLLER#notifyGridChange()")
     }
 
     /**

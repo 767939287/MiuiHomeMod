@@ -5,10 +5,12 @@
 
 ## 功能
 
-1. **关闭桌面 Dock 栏**
-   平板上的 Dock 是一条独立悬浮窗口（`Floating Dock`，`type=2997`，贴底），本模块让
-   `DockControllerImpl#isDockEnabled()` 恒为 `false`，`initialize()` 整段跳过 ——
-   不创建 Dock 窗口、不把 `HotSeats` 挂进去、也不注册底部手势/触摸热区。
+1. **隐藏桌面 Dock 栏**
+   平板上的 Dock 是一条独立悬浮窗口（`Floating Dock`，`type=2997`，贴底）。
+   **不改 Dock 控制器的生命周期**（跳过 `initialize()` 会让桌面直接崩溃），只做两件事：
+   把 `DeviceConfig.getHotSeatsHeight()` / `getDockWindowHeight()` 压成 1px，
+   并让 `GestureTouchEventTracker#isTouchCountAndHotSeatSupport()` 返回 `false`（上滑不再进 Dock）。
+   思路同 HyperCeiler 的 `HideDock` + `HotSeatsHeight`。
 
 2. **网格向下扩展一行**
    Dock 的高度本来是从桌面网格里扣掉的（`cellSize = (height - top - bottom - dockBar - indicator) / countY`），
@@ -21,7 +23,9 @@
 | 目标 | 说明 |
 | --- | --- |
 | `com.miui.home.launcher.common.Utilities#isPadDevice()` | 平板判定，非平板直接不挂 hook |
-| `com.miui.home.launcher.dock.DockControllerImpl#isDockEnabled()` | 返回 `false`，关闭整个 Dock 流程 |
+| `com.miui.home.launcher.DeviceConfig#getHotSeatsHeight()` | 返回 1px，HotSeats 不再占高度 |
+| `com.miui.home.launcher.DeviceConfig#getDockWindowHeight()` | 返回 1px，Dock 悬浮窗高度几乎为零 |
+| `com.miui.home.recents.GestureTouchEventTracker#isTouchCountAndHotSeatSupport()` | 返回 `false`，上滑手势跳过 Dock |
 | `com.miui.home.launcher.grid.GridController#notifyGridChange()` | 下发前把 `mActiveGridConfigInWorkspace` 换成扩展后的 `GridConfig` |
 
 `CellLayout`、翻页指示条、图标放置逻辑读的都是同一个 `GridConfig`，所以三者保持一致。
