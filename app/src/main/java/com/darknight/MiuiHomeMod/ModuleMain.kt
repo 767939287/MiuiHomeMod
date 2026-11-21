@@ -3,6 +3,7 @@ package com.darknight.MiuiHomeMod
 import android.content.Context
 import android.content.res.Configuration
 import android.util.Log
+import android.view.View
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 
@@ -28,6 +29,8 @@ class ModuleMain : XposedModule() {
         const val APPLICATION = "com.miui.home.launcher.Application"
         const val DEVICE_CONFIG = "com.miui.home.launcher.DeviceConfig"
         const val GESTURE_TRACKER = "com.miui.home.recents.GestureTouchEventTracker"
+        const val DOCK_CONTAINER_VIEW = "com.miui.home.launcher.dock.DockContainerView"
+        const val DOCK_WINDOW_MANAGER = "com.miui.home.launcher.dock.v3.view.DockWindowManager"
         const val GRID_CONTROLLER = "com.miui.home.launcher.grid.GridController"
         const val GRID_CONFIG_BUILDER = "com.miui.home.launcher.grid.GridConfig\$GridConfigBuilder"
 
@@ -72,8 +75,9 @@ class ModuleMain : XposedModule() {
         var applied = 0
         if (hookDockSize(cl)) applied++
         if (hookDockGesture(cl)) applied++
+        if (hookDockViewHide(cl)) applied++
         if (hookExpandWorkspaceGrid(cl)) applied++
-        log(Log.INFO, TAG, "hook 应用完成: $applied/3")
+        log(Log.INFO, TAG, "hook 应用完成: $applied/4")
     }
 
     /**
@@ -168,6 +172,46 @@ class ModuleMain : XposedModule() {
             log(Log.WARN, TAG, "拦截 Dock 手势失败", t)
             false
         }
+    }
+
+    /**
+     * 彻底隐藏 Dock 视图：Dock 是独立悬浮窗，高度压到 1px 后理论上已不可见，
+     * 但 reparentToWindow() 会再把 dockRootView 设回 VISIBLE。这里在窗口 attach 之后、
+     * 以及每次 reparentToWindow 之后，强制把 DockContainerView 置为 GONE + 全透明。
+     */
+    private fun hookDockViewHide(cl: ClassLoader): Boolean {
+        return try {
+            val viewCls = Class.forName(DOCK_CONTAINER_VIEW, false, cl)
+            hook(viewCls.getDeclaredMethod("onAttachedToWindow")).intercept { chain ->
+                chain.proceed()
+                hideView(chain.thisObject)
+                null
+            }
+
+            val windowMgrCls = Class.forName(DOCK_WINDOW_MANAGER, false, cl)
+            val dockRootField = windowMgrCls.getDeclaredField("dockRootView").apply { isAccessible = true }
+            val reparent = windowMgrCls.getDeclaredMethod("reparentToWindow").apply { isAccessible = true }
+            hook(reparent).intercept { chain ->
+                chain.proceed()
+                try {
+                    hideView(dockRootField.get(chain.thisObject))
+                } catch (t: Throwable) {
+                    log(Log.WARN, TAG, "reparentToWindow 后隐藏 Dock 失败", t)
+                }
+                null
+            }
+            log(Log.INFO, TAG, "已 hook DockContainerView#onAttachedToWindow / reparentToWindow")
+            true
+        } catch (t: Throwable) {
+            log(Log.WARN, TAG, "强制隐藏 Dock 视图失败", t)
+            false
+        }
+    }
+
+    private fun hideView(target: Any?) {
+        val view = target as? View ?: return
+        if (view.visibility != View.GONE) view.visibility = View.GONE
+        if (view.alpha != 0f) view.alpha = 0f
     }
 
     /**
