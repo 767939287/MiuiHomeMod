@@ -13,7 +13,8 @@ import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
  * 2. Dock 关掉后空出来的底部空间不会被浪费：把桌面网格向下扩展一行，
  *    cellSize 尽量保持不变，网格高度填满原 Dock 区域。
  *
- * 仅平板设备生效（Utilities.isPadDevice()），手机端不做任何修改。
+ * 仅平板设备生效（`ro.build.characteristics` 含 tablet，官方文档推荐做法），
+ * 手机端不做任何修改。
  */
 class ModuleMain : XposedModule() {
 
@@ -73,8 +74,27 @@ class ModuleMain : XposedModule() {
         log(Log.INFO, TAG, "hook 应用完成: $applied/3")
     }
 
-    /** 平板判定，依次尝试 Utilities.isPadDevice() / DeviceConfig.USE_LIST_HOTSEATS。 */
+    /**
+     * 平板判定，依次尝试：
+     * 1. 小米官方《平板适配说明》推荐的 `ro.build.characteristics` 含 tablet —— 不依赖
+     *    Application/Resources，最安全；
+     * 2. MiuiHome 自己的 `Utilities.isPadDevice()`（等价于内部 Build.IS_TABLET）；
+     * 3. `DeviceConfig.USE_LIST_HOTSEATS`。
+     */
     private fun isPadDevice(cl: ClassLoader): Boolean {
+        try {
+            val cls = Class.forName("android.os.SystemProperties")
+            val get = cls.getDeclaredMethod("get", String::class.java)
+            get.isAccessible = true
+            val characteristics = get.invoke(null, "ro.build.characteristics") as? String
+            if (!characteristics.isNullOrEmpty()) {
+                val isTablet = characteristics.contains("tablet")
+                log(Log.INFO, TAG, "ro.build.characteristics=$characteristics -> isTablet=$isTablet")
+                return isTablet
+            }
+        } catch (t: Throwable) {
+            log(Log.WARN, TAG, "SystemProperties 不可用，回退到 Utilities.isPadDevice(): $t")
+        }
         try {
             val cls = Class.forName(UTILITIES, false, cl)
             val method = cls.getDeclaredMethod("isPadDevice")
