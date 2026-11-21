@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MiuiHomeMod</string>
+    <string name="module_description">平板版 MIUI 桌面增强：关闭底部 Dock 栏，并把桌面网格向下扩展一行</string>
+</resources>
