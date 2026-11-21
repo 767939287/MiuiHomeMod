@@ -22,7 +22,7 @@
 
 | 目标 | 说明 |
 | --- | --- |
-| `com.miui.home.launcher.common.Utilities#isPadDevice()` | 平板判定，非平板直接不挂 hook |
+| `com.miui.home.launcher.common.Utilities#isPadDevice()` | 回退的平板判定（首选屏幕最小宽度 ≥ 600dp） |
 | `com.miui.home.launcher.DeviceConfig#getHotSeatsHeight()` | 返回 1px，HotSeats 不再占高度 |
 | `com.miui.home.launcher.DeviceConfig#getDockWindowHeight()` | 返回 1px，Dock 悬浮窗高度几乎为零 |
 | `com.miui.home.recents.GestureTouchEventTracker#isTouchCountAndHotSeatSupport()` | 返回 `false`，上滑手势跳过 Dock |

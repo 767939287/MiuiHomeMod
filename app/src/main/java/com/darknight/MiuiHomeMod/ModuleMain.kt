@@ -1,5 +1,7 @@
 package com.darknight.MiuiHomeMod
 
+import android.content.Context
+import android.content.res.Configuration
 import android.util.Log
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
@@ -13,7 +15,7 @@ import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
  * 2. Dock 关掉后空出来的底部空间不会被浪费：把桌面网格向下扩展一行，
  *    cellSize 尽量保持不变，网格高度填满原 Dock 区域。
  *
- * 仅平板设备生效（`ro.build.characteristics` 含 tablet，官方文档推荐做法），
+ * 仅平板设备生效（最小宽度 >= 600dp 优先，官方文档推荐做法），
  * 手机端不做任何修改。
  */
 class ModuleMain : XposedModule() {
@@ -76,12 +78,32 @@ class ModuleMain : XposedModule() {
 
     /**
      * 平板判定，依次尝试：
-     * 1. 小米官方《平板适配说明》推荐的 `ro.build.characteristics` 含 tablet —— 不依赖
-     *    Application/Resources，最安全；
-     * 2. MiuiHome 自己的 `Utilities.isPadDevice()`（等价于内部 Build.IS_TABLET）；
-     * 3. `DeviceConfig.USE_LIST_HOTSEATS`。
+     * 1. 屏幕最小宽度 >= 600dp（官方推荐做法；Android 17 上 `ro.build.characteristics`
+     *    可能因 SELinux 权限限制读取失败，所以以宽度为准，分屏/自由窗口也兼容）；
+     * 2. `ro.build.characteristics` 含 tablet；
+     * 3. MiuiHome 自己的 `Utilities.isPadDevice()`（等价于内部 Build.IS_TABLET）；
+     * 4. `DeviceConfig.USE_LIST_HOTSEATS`。
      */
     private fun isPadDevice(cl: ClassLoader): Boolean {
+        try {
+            val appCls = Class.forName(APPLICATION, false, cl)
+            val instance = appCls.getMethod("getInstance").invoke(null)
+            if (instance is Context) {
+                val configuration = instance.resources.configuration
+                val smallestWidthDp = configuration.smallestScreenWidthDp
+                if (smallestWidthDp > 0) {
+                    val isTablet = smallestWidthDp >= 600
+                    log(Log.INFO, TAG, "smallestScreenWidthDp=$smallestWidthDp -> isTablet=$isTablet")
+                    return isTablet
+                }
+                val isLarge = (configuration.screenLayout and Configuration.SCREENLAYOUT_SIZE_MASK) >=
+                    Configuration.SCREENLAYOUT_SIZE_LARGE
+                log(Log.INFO, TAG, "screenLayout LARGE -> isTablet=$isLarge")
+                return isLarge
+            }
+        } catch (t: Throwable) {
+            log(Log.WARN, TAG, "读取屏幕尺寸失败，回退到 ro.build.characteristics: $t")
+        }
         try {
             val cls = Class.forName("android.os.SystemProperties")
             val get = cls.getDeclaredMethod("get", String::class.java)
